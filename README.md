@@ -27,7 +27,7 @@ Named after a soft-spoken guardian, Ellis watches over your infrastructure while
 - **Free & Premium** — 3 monitors free forever; upgrade to 10 monitors with a one‑time payment of 5 Telegram Stars.
 - **Export** — download your monitor list as JSON.
 
----ц
+---
 
 ### Prerequisites
 - Python 3.11+
