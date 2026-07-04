@@ -1,176 +1,248 @@
-# 🌙 Ellis — Uptime Monitoring Telegram Bot
+🌙 Ellis — Uptime Monitoring Telegram Bot
 
-**Ellis** is a gentle yet vigilant uptime monitoring bot that lives in your Telegram chat. She keeps an eye on your websites, servers, APIs, and network services — and immediately lets you know if something goes wrong (or comes back to life).
+Ellis is a gentle yet vigilant uptime monitoring bot that lives inside your Telegram chat.
 
-Named after a soft-spoken guardian, Ellis watches over your infrastructure while you sleep, work, or just need some peace of mind.
+She quietly watches over your websites, servers, APIs, and network services, notifying you immediately whenever something goes wrong—or when everything is back online.
 
----
+Named after a soft-spoken guardian, Ellis keeps your infrastructure safe while you sleep, work, or simply enjoy peace of mind.
 
-## ✨ Features
-
-- **8 monitor types:**
-  - 🌐 **HTTP(S)** — checks a URL for an expected HTTP status code.
-  - 🔍 **Keyword** — verifies the presence (or absence) of a string in the response body.
-  - 📡 **Ping** — ICMP echo check to ensure a host is reachable.
-  - 🔌 **Port** — checks if a TCP port is open (SMTP, FTP, databases, custom services…).
-  - 💓 **Heartbeat** — listens for incoming requests from your cron jobs or external services (built‑in HTTP server).
-  - 🌍 **DNS** — resolves domain names and verifies expected DNS records (A, MX, TXT, etc.).
-  - ⚙️ **API** — validates JSON responses with JSONPath expressions and expected values.
-  - 📦 **UDP** — sends and receives UDP datagrams (perfect for SNMP, game servers, etc.).
-
-- **Intuitive Telegram interface** — everything via inline keyboards and a step‑by‑step setup wizard. No external dashboards required.
-- **Uptime graphs** (24h / 7d / 30d) with response‑time plots and coloured status bands.
-- **Smart notifications** — alerts when a monitor changes state (DOWN → UP / UP → DOWN) with optional repeated reminders while the issue persists.
-- **Maintenance windows** — suppress alerts during planned downtimes (e.g., nightly backups).
-- **Pause / resume** monitors with a single tap.
-- **Statistics** — uptime percentage, average response time, and total checks for any monitor.
-- **Free & Premium** — 3 monitors free forever; upgrade to 10 monitors with a one‑time payment of 5 Telegram Stars.
-- **Export** — download your monitor list as JSON.
-
----
-
-### Prerequisites
-- Python 3.11+
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- (Optional) A server with a public IP if you want to use the **Heartbeat** or **UDP** monitors from the outside world.
-
-### 1. Clone the repository
-```bash
+✨ Features
+🔎 8 Monitoring Types
+🌐 HTTP(S) — Monitor a URL and verify its HTTP status code.
+🔍 Keyword — Check whether a specific string exists (or does not exist) in the response body.
+📡 Ping — ICMP reachability monitoring.
+🔌 TCP Port — Verify that a TCP port is open and accepting connections.
+💓 Heartbeat — Receive periodic requests from cron jobs or external services via the built-in HTTP server.
+🌍 DNS — Validate DNS records (A, AAAA, MX, TXT, CNAME, etc.).
+⚙️ API — Validate JSON responses using JSONPath expressions.
+📦 UDP — Send and receive UDP packets (useful for SNMP, game servers, and custom protocols).
+📱 Telegram-first Experience
+Beautiful inline keyboard interface
+Step-by-step setup wizard
+No web dashboard required
+Everything happens directly inside Telegram
+📊 Statistics & Graphs
+24-hour, 7-day and 30-day uptime graphs
+Response time charts
+Colored status timeline
+Uptime percentage
+Average response time
+Total number of checks
+🔔 Smart Notifications
+Instant alerts when a monitor changes status
+Optional repeated reminders while a service remains offline
+Recovery notifications when a service comes back online
+⚙️ Monitor Management
+Pause or resume monitors with one tap
+Maintenance windows
+Manual health checks
+JSON export/import support
+⭐ Premium
+Free: up to 3 monitors
+Premium: up to 10 monitors
+One-time payment of 5 Telegram Stars
+🚀 Installation
+Prerequisites
+Python 3.11+
+Telegram Bot Token from @BotFather
+(Optional) A server with a public IP address if you plan to use Heartbeat or UDP monitors.
+1. Clone the repository
 git clone https://github.com/yourusername/ellis-bot.git
 cd ellis-bot
 2. Install dependencies
-bash
 pip install -r requirements.txt
 3. Configure the bot
-Edit main.py and replace the placeholder token with your own:
 
-python
+Edit main.py and set your bot token:
+
 BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-You can also change HEARTBEAT_PORT (default 8080) if needed.
 
-4. Run Ellis
-bash
+You may also change the heartbeat server port if necessary:
+
+HEARTBEAT_PORT = 8080
+4. Start Ellis
 python main.py
-Ellis will start the Telegram polling and the built‑in heartbeat server (if configured). You’ll see logs in the console.
 
-5. Start a chat
-Open Telegram, find your bot, and send /start. Ellis will guide you from there.
+Ellis will start:
 
-###🧭 Usage
+Telegram polling
+Background monitoring scheduler
+Built-in Heartbeat HTTP server (if enabled)
+
+Logs will appear in the console.
+
+5. Start chatting
+
+Open Telegram, find your bot, and send:
+
+/start
+
+Ellis will guide you through the setup process.
+
+🧭 Usage
 Main Menu
-📋 Мои мониторы — list, pause, resume, check, or delete your monitors.
+📋 My Monitors
 
-➕ Добавить монитор — step‑by‑step addition of any monitor type.
+View, check, pause, resume or delete your monitors.
 
-⚙️ Настройки — configure repeat alerts and maintenance windows.
+➕ Add Monitor
 
-💳 Premium — upgrade your monitor limit to 10.
+Create a new monitor using the interactive wizard.
 
-###Commands
+⚙️ Settings
+
+Configure:
+
+notification reminders
+maintenance windows
+monitoring preferences
+⭐ Premium
+
+Upgrade your monitor limit.
+
+⌨️ Commands
 Command	Description
-/start	Welcome message and main menu
-/list	Show all your monitors
-/add <type> <params>	Quick add (bypass wizard)
-/pause <id>	Pause a monitor
-/resume <id>	Resume a monitor
+/start	Open the main menu
+/list	Show all monitors
+/add <type> <params>	Quick monitor creation
+/pause <id>	Pause monitoring
+/resume <id>	Resume monitoring
 /check <id>	Run an immediate check
 /delete <id>	Delete a monitor
-/stats <id>	Show uptime stats for the last 24h
-/graph <id>	Generate an uptime graph (24h)
-/export	Export your monitors as JSON
+/stats <id>	Show statistics
+/graph <id>	Generate uptime graph
+/export	Export monitors as JSON
 /settings	Open settings
-/premium	Information about premium
-Adding a monitor (example – HTTP)
-Press ➕ Добавить монитор → 🌐 HTTP(s)
+/premium	Premium information
+🌐 Example: Adding an HTTP Monitor
+Press ➕ Add Monitor
+Select 🌐 HTTP(S)
+Enter a monitor name (or - for automatic naming)
+Enter the URL and optional expected status code
 
-Enter a name (or - for auto).
+Example:
 
-Enter the URL and optionally the expected status code (e.g., https://example.com 200).
+https://example.com 200
+Choose the monitoring interval
+Confirm
 
-Choose the check interval (minimum 60 seconds).
+Ellis immediately performs the first health check and begins monitoring.
 
-Confirm — Ellis will immediately test the URL and start monitoring.
+💓 Heartbeat Monitoring
 
-Heartbeat monitors provide a unique URL like http://<your-server-ip>:8080/hb_abc123. Configure your cron job to curl that URL every N minutes, and Ellis will alert if it stops.
+Heartbeat monitors generate a unique endpoint, for example:
 
-###⚙️ Configuration
-All sensitive settings are in the top of main.py:
+http://your-server-ip:8080/hb_abc123
 
-python
+Configure your cron job or external service to periodically send a request:
+
+curl http://your-server-ip:8080/hb_abc123
+
+If Ellis stops receiving requests within the expected interval, you'll receive an alert.
+
+⚙️ Configuration
+
+Most configuration values are located near the top of main.py.
+
 BOT_TOKEN = "YOUR_TOKEN"
+
 DATABASE = "uptime_bot.db"
+
 HEARTBEAT_PORT = 8080
-DEFAULT_INTERVAL = 300  # 5 minutes
-DEFAULT_TIMEOUT = 10    # seconds
+
+DEFAULT_INTERVAL = 300      # seconds
+DEFAULT_TIMEOUT = 10        # seconds
+
 MAX_FREE_MONITORS = 3
 MAX_PREMIUM_MONITORS = 10
+
 PREMIUM_PRICE_STARS = 5
-You can adjust the monitoring concurrency by changing the semaphore inside scheduler_loop() (default 50 simultaneous checks).
 
-###🗄️ Database
-Ellis uses SQLite (with WAL mode) – no external database required. The file uptime_bot.db is created automatically on first run and contains three tables: users, monitors, and checks.
+Monitoring concurrency can be adjusted by modifying the semaphore inside scheduler_loop().
 
-For 100+ users with many monitors, SQLite handles the load easily. If you ever need to scale beyond that, the architecture can be migrated to PostgreSQL by swapping the aiosqlite calls.
+Default:
 
-###🏗️ Architecture
-Telegram Bot: aiogram 3.x with finite state machine (FSM) for dialogs.
+50 simultaneous checks
+🗄️ Database
 
-HTTP Client: aiohttp ClientSession with connection pooling (kept alive for performance).
+Ellis uses SQLite in WAL mode, requiring no external database.
 
-Background Scheduler: an infinite asyncio loop that respects each monitor’s interval, maintenance windows, and repeat‑alert logic.
+The database is automatically created on first launch.
 
-Heartbeat Server: aiohttp web server on a separate port, only handles incoming heartbeat pings.
+Tables:
 
-Monitoring Backends:
+users
+monitors
+checks
 
-HTTP/Keyword/API → aiohttp
+SQLite comfortably handles hundreds of users and thousands of checks.
 
-Ping → system ping subprocess (cross‑platform)
+If needed, the storage layer can later be migrated to PostgreSQL with minimal changes.
 
-Port → asyncio.open_connection
-
-DNS → dnspython async resolver
-
-UDP → asyncio.DatagramProtocol
-
-Heartbeat → timestamp comparison
-
-Payments: Telegram Stars (native) – no external payment provider.
-
-###📦 Dependencies
+🏗️ Architecture
+Telegram
+     │
+     ▼
+Aiogram 3.x Bot
+     │
+     ├── FSM Dialogs
+     ├── Inline UI
+     ├── Scheduler
+     │
+     ├── HTTP(S)
+     ├── Keyword
+     ├── API
+     ├── Ping
+     ├── TCP Port
+     ├── DNS
+     ├── UDP
+     └── Heartbeat
+     │
+SQLite Database
+Core Components
+Telegram Bot — Aiogram 3.x
+FSM — Interactive setup dialogs
+HTTP Client — aiohttp
+Scheduler — Async monitoring loop
+Heartbeat Server — Built-in aiohttp.web
+Database — SQLite + WAL
+Charts — Matplotlib
+Payments — Telegram Stars
+📦 Dependencies
 aiogram>=3.7
-
 aiohttp
-
 aiosqlite
-
 dnspython
-
+jsonpath-ng
 matplotlib
 
-jsonpath-ng
+See requirements.txt for the complete dependency list.
 
-All listed in requirements.txt.
+🤝 Contributing
 
-###🤝 Contributing
-Pull requests are welcome! For major changes, please open an issue first to discuss what you would like to change.
+Pull requests are always welcome.
 
-If you add a new monitor type, please:
+For significant changes, please open an issue first to discuss your proposal.
 
-Add the check function in the check_*.py style.
+When adding a new monitor type, remember to:
 
-Extend the perform_check dispatcher.
+implement the new check_* function;
+register it inside perform_check();
+update the monitor selection keyboard;
+extend the setup wizard;
+document the new feature.
+📄 License
 
-Update the monitor_types_keyboard and the process_config handler.
+Licensed under the MIT License.
 
-###📜 License
-MIT
+❤️ Acknowledgements
 
-###🌟 Acknowledgements
-Inspired by UptimeRobot – the original uptime guardian.
+Inspired by UptimeRobot.
 
-Built with love for the Telegram community.
+Built with ❤️ for the Telegram community.
 
-Special thanks to the open‑source libraries that make Ellis possible.
+Special thanks to all open-source projects that make Ellis possible.
 
-Ellis — quietly watching over your uptime, with a gentle touch and a vigilant eye.
+🌙 Ellis
+
+Quietly watching over your infrastructure — so you don't have to.
