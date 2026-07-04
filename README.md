@@ -29,8 +29,6 @@ Named after a soft-spoken guardian, Ellis watches over your infrastructure while
 
 ---ц
 
-## 🚀 Quick Start
-
 ### Prerequisites
 - Python 3.11+
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
@@ -58,7 +56,7 @@ Ellis will start the Telegram polling and the built‑in heartbeat server (if co
 5. Start a chat
 Open Telegram, find your bot, and send /start. Ellis will guide you from there.
 
-🧭 Usage
+###🧭 Usage
 Main Menu
 📋 Мои мониторы — list, pause, resume, check, or delete your monitors.
 
@@ -68,7 +66,7 @@ Main Menu
 
 💳 Premium — upgrade your monitor limit to 10.
 
-Commands
+###Commands
 Command	Description
 /start	Welcome message and main menu
 /list	Show all your monitors
@@ -95,7 +93,7 @@ Confirm — Ellis will immediately test the URL and start monitoring.
 
 Heartbeat monitors provide a unique URL like http://<your-server-ip>:8080/hb_abc123. Configure your cron job to curl that URL every N minutes, and Ellis will alert if it stops.
 
-⚙️ Configuration
+###⚙️ Configuration
 All sensitive settings are in the top of main.py:
 
 python
@@ -109,12 +107,12 @@ MAX_PREMIUM_MONITORS = 10
 PREMIUM_PRICE_STARS = 5
 You can adjust the monitoring concurrency by changing the semaphore inside scheduler_loop() (default 50 simultaneous checks).
 
-🗄️ Database
+###🗄️ Database
 Ellis uses SQLite (with WAL mode) – no external database required. The file uptime_bot.db is created automatically on first run and contains three tables: users, monitors, and checks.
 
 For 100+ users with many monitors, SQLite handles the load easily. If you ever need to scale beyond that, the architecture can be migrated to PostgreSQL by swapping the aiosqlite calls.
 
-🏗️ Architecture
+###🏗️ Architecture
 Telegram Bot: aiogram 3.x with finite state machine (FSM) for dialogs.
 
 HTTP Client: aiohttp ClientSession with connection pooling (kept alive for performance).
@@ -139,7 +137,7 @@ Heartbeat → timestamp comparison
 
 Payments: Telegram Stars (native) – no external payment provider.
 
-📦 Dependencies
+###📦 Dependencies
 aiogram>=3.7
 
 aiohttp
@@ -154,7 +152,7 @@ jsonpath-ng
 
 All listed in requirements.txt.
 
-🤝 Contributing
+###🤝 Contributing
 Pull requests are welcome! For major changes, please open an issue first to discuss what you would like to change.
 
 If you add a new monitor type, please:
@@ -165,10 +163,10 @@ Extend the perform_check dispatcher.
 
 Update the monitor_types_keyboard and the process_config handler.
 
-📜 License
+###📜 License
 MIT
 
-🌟 Acknowledgements
+###🌟 Acknowledgements
 Inspired by UptimeRobot – the original uptime guardian.
 
 Built with love for the Telegram community.
