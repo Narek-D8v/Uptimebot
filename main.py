@@ -31,7 +31,7 @@ from aiohttp import web
 # ------------------------------
 # Конфигурация
 # ------------------------------
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"          # замените
+BOT_TOKEN = os.environ.get('BOT_TOKEN')          # замените
 DATABASE = "uptime_bot.db"
 HEARTBEAT_PORT = 8080                 # порт для встроенного heartbeat-сервера
 DEFAULT_INTERVAL = 300                 # 5 минут
