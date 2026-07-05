@@ -1,0 +1,6 @@
+aiogram>=3.7
+aiohttp
+aiosqlite
+dnspython
+matplotlib
+jsonpath-ng
