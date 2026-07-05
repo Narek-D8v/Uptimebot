@@ -715,7 +715,8 @@ async function renderSettings(container) {
           <button class="chip ${accentColor === 'orange' ? 'active' : ''}" onclick="setAccent('orange')">🧡 Orange</button>
         </div>
       </div>
-      <div class="form-group"><label class="form-label">Email</label><input name="email" type="email" value="${esc(user.email||'')}"/></div>
+      <div class="form-group"><label class="form-label">Email</label><input name="email" type="email" value="${esc(user.email||'')}"/>
+        <button class="btn btn-sm btn-outline" type="button" onclick="testEmail()" style="margin-top:6px">📧 Test Email</button></div>
       <div class="form-group"><label class="form-label">Alert Repeat (minutes, 0=off)</label><input name="alert_repeat" type="number" value="${user.alert_repeat||0}" min="0"/></div>
       <div class="form-group"><label class="form-label">Maintenance Window</label>
         <div style="display:flex;gap:8px"><input name="maintenance_from" type="time" value="${user.maintenance_from||''}" style="flex:1"/>
@@ -752,6 +753,11 @@ async function submitSettings(e) {
   body.maintenance_from = fd.get('maintenance_from') || '';
   body.maintenance_to = fd.get('maintenance_to') || '';
   try { await api('POST', '/settings', body); Toast.show('✅ Settings saved', 'success'); }
+  catch (e) { Toast.show(e.message, 'error'); }
+}
+
+async function testEmail() {
+  try { await api('POST', '/settings/test-email'); Toast.show('📧 Test email sent! Check your inbox', 'success'); }
   catch (e) { Toast.show(e.message, 'error'); }
 }
 
