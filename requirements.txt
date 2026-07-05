@@ -4,3 +4,4 @@ aiosqlite
 dnspython
 matplotlib
 jsonpath-ng
+aiosmtplib
