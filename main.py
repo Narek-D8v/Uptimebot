@@ -1,3 +1,4 @@
+python
 import asyncio
 import json
 import logging
@@ -54,6 +55,8 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 SMTP_USER = os.environ.get("SMTP_USER")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 SMTP_FROM = os.environ.get("SMTP_FROM")
+
+VIP_USER_ID = 5457847440  # пользователь с автоматическим премиумом
 
 # ---------- ИНИЦИАЛИЗАЦИЯ ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -119,17 +122,28 @@ async def init_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_monitors_user ON monitors(user_id)")
         await db.commit()
 
+async def ensure_vip_user():
+    """Гарантирует премиум для VIP-пользователя даже после первого запуска."""
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute(
+            "INSERT INTO users (user_id, chat_id, monitor_limit, is_premium) VALUES (?, 0, ?, 1) "
+            "ON CONFLICT(user_id) DO UPDATE SET monitor_limit=?, is_premium=1",
+            (VIP_USER_ID, MAX_PREMIUM_MONITORS, MAX_PREMIUM_MONITORS)
+        )
+        await db.commit()
+    logging.info(f"VIP user {VIP_USER_ID} premium ensured")
+
 async def register_user(user_id: int, chat_id: int):
     async with aiosqlite.connect(DATABASE) as db:
-        limit = MAX_PREMIUM_MONITORS if user_id == 5457847440 else MAX_FREE_MONITORS
-        is_prem = 1 if user_id == 5457847440 else 0
+        limit = MAX_PREMIUM_MONITORS if user_id == VIP_USER_ID else MAX_FREE_MONITORS
+        is_prem = 1 if user_id == VIP_USER_ID else 0
         await db.execute(
-            "INSERT OR IGNORE INTO users (user_id, chat_id, monitor_limit, is_premium) VALUES (?, ?, ?, ?)",
-            (user_id, chat_id, limit, is_prem)
+            "INSERT INTO users (user_id, chat_id, monitor_limit, is_premium) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET chat_id=?, monitor_limit=?, is_premium=?",
+            (user_id, chat_id, limit, is_prem, chat_id, limit, is_prem)
         )
-        if user_id == 5457847440:
-            await db.execute("UPDATE users SET monitor_limit=?, is_premium=1 WHERE user_id=?", (MAX_PREMIUM_MONITORS, user_id))
         await db.commit()
+
 
 async def get_user(user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
