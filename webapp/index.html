@@ -46,12 +46,14 @@
 </div>
 
 <script>
-/* ---------- Preview-only mock backend & Telegram shim ---------- */
+/* ---------- Telegram shim for local dev outside Telegram WebView ---------- */
+if (!window.Telegram) {
 window.Telegram = { WebApp: {
   ready(){}, expand(){}, initData: 'preview-init-data',
   BackButton: { onClick(){} }, onEvent(){}
 }};
 
+/* ---------- Mock backend for local dev only ---------- */
 function nowMinus(mins){ return new Date(Date.now() - mins*60000).toISOString(); }
 
 function genChecks(n, downEvery, baseMs){
@@ -111,11 +113,11 @@ window.fetch = function(url, opts={}){
       const mon = MOCK_MONITORS.find(m => m.id === parseInt(checksMatch[1]));
       return respond(mon ? mon.recent_checks : []);
     }
-    // generic writes (pause, reorder, settings, avatar, export, add, delete...)
     return respond({ ok: true, id: Math.floor(Math.random()*1000)+10, token: 'newtok' + Math.floor(Math.random()*999) });
   }
   return realFetch(url, opts);
 };
+}
 </script>
 <script src="app.js"></script>
 </body>
