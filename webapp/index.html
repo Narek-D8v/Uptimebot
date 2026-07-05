@@ -1,1 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Ellis Dashboard — Preview (mock data)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="styles.css">
+<style>body{background:#e9ebf3}</style>
+</head>
+<body>
+<div id="app">
+  <div id="loading-screen" class="screen active">
+    <div class="spinner"></div>
+    <p class="animate__animated animate__fadeIn">Ellis is waking up...</p>
+  </div>
+  <div id="error-screen" class="screen" style="display:none">
+    <p id="error-message">Authentication failed</p>
+    <button class="btn btn-glow" onclick="location.reload()">Retry</button>
+  </div>
+  <div id="main-screen" class="screen" style="display:none">
+    <header id="app-header">
+      <button id="back-btn" class="header-btn" style="display:none" onclick="router.back()">&#8592;</button>
+      <h1 id="page-title" class="animate__animated">Dashboard</h1>
+      <button class="header-btn" onclick="router.go('settings')">&#9881;</button>
+    </header>
+    <main id="page-content" class="animate__animated"></main>
+    <div id="context-menu" class="context-menu" style="display:none"></div>
+    <div id="snackbar" class="snackbar"></div>
+    <nav id="tab-bar">
+      <button class="tab-btn active" data-page="dashboard" onclick="router.go('dashboard')">
+        <span class="tab-icon">&#9776;</span><span class="tab-label">Dash</span>
+      </button>
+      <button class="tab-btn" data-page="monitors" onclick="router.go('monitors')">
+        <span class="tab-icon">&#9783;</span><span class="tab-label">Monitors</span>
+      </button>
+      <button class="tab-btn" data-page="incidents" onclick="router.go('incidents')">
+        <span class="tab-icon">&#9888;</span><span class="tab-label">Log</span>
+      </button>
+      <button class="tab-btn" data-page="export" onclick="router.go('export')">
+        <span class="tab-icon">&#8615;</span><span class="tab-label">Export</span>
+      </button>
+    </nav>
+  </div>
+</div>
 
+<script>
+/* ---------- Preview-only mock backend & Telegram shim ---------- */
+window.Telegram = { WebApp: {
+  ready(){}, expand(){}, initData: 'preview-init-data',
+  BackButton: { onClick(){} }, onEvent(){}
+}};
+
+function nowMinus(mins){ return new Date(Date.now() - mins*60000).toISOString(); }
+
+function genChecks(n, downEvery, baseMs){
+  const arr = [];
+  for (let i=0;i<n;i++){
+    const isUp = !(downEvery && i % downEvery === 0 && i !== 0);
+    arr.push({ checked_at: nowMinus(i*5), is_up: isUp, response_time_ms: isUp ? baseMs + Math.round(Math.sin(i/3)*40 + Math.random()*30) : null });
+  }
+  return arr;
+}
+
+const MOCK_MONITORS = [
+  { id:1, name:'api.ellisdash.io', type:'http', is_up:true, is_paused:false, last_checked:nowMinus(1), interval_seconds:60, consecutive_failures:0, config:{url:'https://api.ellisdash.io/health', icon:'🌐'}, stats_24h:{uptime:99.98}, recent_checks:genChecks(12,0,42) },
+  { id:2, name:'telegram-bot worker', type:'heartbeat', is_up:true, is_paused:false, last_checked:nowMinus(2), interval_seconds:30, consecutive_failures:0, config:{icon:'💓'}, stats_24h:{uptime:99.5}, recent_checks:genChecks(12,0,18) },
+  { id:3, name:'webhook.relay', type:'api', is_up:true, is_paused:false, last_checked:nowMinus(1), interval_seconds:120, consecutive_failures:1, config:{icon:'⚙️'}, stats_24h:{uptime:97.2}, recent_checks:genChecks(12,6,610) },
+  { id:4, name:'export.worker', type:'port', is_up:false, is_paused:false, last_checked:nowMinus(2), interval_seconds:90, consecutive_failures:5, config:{icon:'🔌'}, stats_24h:{uptime:81.3}, recent_checks:genChecks(12,2,0) },
+  { id:5, name:'dns.primary', type:'dns', is_up:true, is_paused:true, last_checked:nowMinus(40), interval_seconds:300, consecutive_failures:0, config:{icon:'🌍'}, stats_24h:{uptime:100}, recent_checks:genChecks(12,0,25) }
+];
+
+const MOCK_INCIDENTS = [
+  { monitor_name:'export.worker', monitor_type:'port', from_status:true, to_status:false, to_time:nowMinus(4), from_time:nowMinus(400) },
+  { monitor_name:'webhook.relay', monitor_type:'api', from_status:false, to_status:true, to_time:nowMinus(90), from_time:nowMinus(120) },
+  { monitor_name:'webhook.relay', monitor_type:'api', from_status:true, to_status:false, to_time:nowMinus(120), from_time:nowMinus(4000) }
+];
+
+function respond(data, ct='application/json'){
+  return Promise.resolve({
+    ok: true,
+    headers: { get: () => ct },
+    json: async () => data,
+    blob: async () => new Blob([JSON.stringify(data)], {type: ct})
+  });
+}
+
+const realFetch = window.fetch.bind(window);
+window.fetch = function(url, opts={}){
+  if (typeof url === 'string' && url.startsWith('/api/v1')) {
+    const method = (opts.method || 'GET').toUpperCase();
+    const path = url.replace('/api/v1','').split('?')[0];
+
+    if (path === '/user') return respond({ user_id: 918273, is_premium: true, monitor_limit: 20, email:'narek@example.com', alert_repeat:15, maintenance_from:'', maintenance_to:'', public_token:'abc123tok' });
+    if (path === '/stats') {
+      const active = MOCK_MONITORS.filter(m=>!m.is_paused).length;
+      const up = MOCK_MONITORS.filter(m=>m.is_up && !m.is_paused).length;
+      const avg = (MOCK_MONITORS.reduce((s,m)=>s+m.stats_24h.uptime,0)/MOCK_MONITORS.length).toFixed(1);
+      return respond({ total: MOCK_MONITORS.length, active, up, avg_uptime_24h: avg });
+    }
+    if (path === '/monitors' && method === 'GET') return respond(MOCK_MONITORS);
+    if (path === '/incidents') return respond(MOCK_INCIDENTS);
+    const monMatch = path.match(/^\/monitors\/(\d+)$/);
+    if (monMatch) {
+      const mon = MOCK_MONITORS.find(m => m.id === parseInt(monMatch[1]));
+      return respond(mon || {});
+    }
+    const checksMatch = path.match(/^\/monitors\/(\d+)\/checks$/);
+    if (checksMatch) {
+      const mon = MOCK_MONITORS.find(m => m.id === parseInt(checksMatch[1]));
+      return respond(mon ? mon.recent_checks : []);
+    }
+    // generic writes (pause, reorder, settings, avatar, export, add, delete...)
+    return respond({ ok: true, id: Math.floor(Math.random()*1000)+10, token: 'newtok' + Math.floor(Math.random()*999) });
+  }
+  return realFetch(url, opts);
+};
+</script>
+<script src="app.js"></script>
+</body>
+</html>
