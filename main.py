@@ -683,20 +683,50 @@ async def list_monitors(callback: CallbackQuery):
     user = await get_user(user_id)
     limit = user[3] if user else MAX_FREE_MONITORS
     active = len([m for m in monitors if not m[5]])
-    text = f"📊 Активно: {active}/{limit}\n"
+    text = f"📊 Активно: {active}/{limit}\n\n"
     if not monitors:
-        text += "У вас нет мониторов. Добавьте первый!"
-        await callback.message.edit_text(text, reply_markup=main_menu())
-        await callback.answer()
+        text += "У вас пока нет мониторов."
+        kb = InlineKeyboardBuilder()
+        kb.button(text="➕ Добавить", callback_data="menu_add")
+        kb.button(text="🔙 Назад", callback_data="menu_main")
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
         return
+
+    kb = InlineKeyboardBuilder()
     for m in monitors:
-        mid, mtype, name, _, interval, paused, is_up, last_checked = m
+        mid, mtype, name, _, _, paused, is_up, _ = m
         icon = "🟢" if is_up else "🔴" if is_up is False else "⚪️"
-        paused_str = " (пауза)" if paused else ""
-        last = last_checked[:19] if last_checked else "никогда"
-        text += f"{icon} <b>{name or mid}</b> [{mtype}]{paused_str}\n"
-        text += f"⏱ {interval}с | {last}\n"
-    await callback.message.edit_text(text, reply_markup=main_menu())
+        label = f"{icon} {name or mid} [{mtype}]"
+        if paused:
+            label += " ⏸"
+        kb.button(text=label, callback_data=f"monitor_{mid}")
+    kb.button(text="➕ Добавить", callback_data="menu_add")
+    kb.button(text="🔙 Назад", callback_data="menu_main")
+    kb.adjust(1)
+    await callback.message.edit_text("Выберите монитор для управления:", reply_markup=kb.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("monitor_"))
+async def show_monitor_actions(callback: CallbackQuery):
+    monitor_id = int(callback.data.split("_")[1])
+    mon = await get_monitor(monitor_id, callback.from_user.id)
+    if not mon:
+        await callback.answer("Монитор не найден", show_alert=True)
+        return
+    _, _, mtype, name, config_json, interval, paused, last_status, is_up, *_ = mon
+    icon = "🟢" if is_up else "🔴"
+    text = f"{icon} <b>{name or monitor_id}</b> [{mtype}]\n"
+    text += f"Статус: {last_status}\nИнтервал: {interval}с\n"
+    if paused:
+        text += "⏸ На паузе\n"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⏸ Пауза" if not paused else "▶️ Возобновить", callback_data=f"pause_{monitor_id}")
+    kb.button(text="🔄 Проверить", callback_data=f"check_{monitor_id}")
+    kb.button(text="📈 График", callback_data=f"graph_{monitor_id}")
+    kb.button(text="❌ Удалить", callback_data=f"delete_{monitor_id}")   # ← кнопка удаления
+    kb.button(text="🔙 К списку", callback_data="menu_list")
+    kb.adjust(2)
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
     await callback.answer()
 
 # Добавление монитора
@@ -854,10 +884,10 @@ async def manual_check(callback: CallbackQuery):
 async def delete_monitor_cmd(callback: CallbackQuery):
     monitor_id = int(callback.data.split("_")[1])
     if await delete_monitor(monitor_id, callback.from_user.id):
-        await callback.answer("Удалён")
-        await list_monitors(callback)
+        await callback.answer("Монитор удалён")
+        await list_monitors(callback)          # возвращает в список
     else:
-        await callback.answer("Ошибка", show_alert=True)
+        await callback.answer("Ошибка удаления", show_alert=True)
 
 @dp.callback_query(F.data.startswith("graph_"))
 async def graph_menu(callback: CallbackQuery):
