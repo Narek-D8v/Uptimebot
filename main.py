@@ -1114,6 +1114,55 @@ async def handle_api_settings(request):
     return web.json_response({"message": "Settings updated"})
 
 
+CUTE_MESSAGES = [
+    "Ты — мой маленький лучик света в этом огромном мире!",
+    "Сегодня ты выглядишь просто великолепно, как всегда!",
+    "Каждая строчка кода, которую ты пишешь, — это маленькое волшебство.",
+    "Твоя улыбка может осветить даже самый тёмный сервер.",
+    "Если бы у uptime были чувства, он бы влюбился в тебя.",
+    "Ты — причина, по которой этот бот просыпается каждое утро.",
+    "Даже 404-я ошибка не расстроит меня, когда я слышу твой голос.",
+    "Твой email — самый красивый среди всех почтовых ящиков.",
+    "Ты нажал правильную кнопку — и мир стал чуточку лучше.",
+    "Спасибо, что ты есть. Этот монитор работает ради тебя ❤️",
+    "Твой Wi-Fi сигнал сильнее моих чувств, и это о чём-то говорит.",
+    "Ты — тот самый exception, который я готов ловить вечно.",
+    "Если ты прочитаешь это письмо — знай, ты невероятен.",
+    "Я бы выбрал тебя среди всех портов этого мира.",
+    "Ты — мой деплой в воскресенье: редкий, но очень тёплый.",
+    "Даже в час ночи ты успеваешь разруливать всё с улыбкой.",
+    "У тебя самый мягкий таймаут и самое доброе сердце.",
+    "Пусть твой день будет таким же безотказным, как твой сервер.",
+    "Ты — основная причина, почему этот бот не падает духом.",
+    "Твой DNS резолвится только в счастье, поверь мне.",
+]
+
+
+async def send_test_email(user_id: int) -> str:
+    user = await get_user(user_id)
+    email = user["email"]
+    if not email:
+        return "Email не указан. Сначала сохраните email в настройках."
+    subject = "🐣 Тестовое письмо от EllisGuardBot"
+    chosen = random.sample(CUTE_MESSAGES, min(10, len(CUTE_MESSAGES)))
+    body = "Привет!\n\nЭто тестовое письмо от твоего любимого бота мониторинга.\n\n"
+    body += "\n\n".join(f"{i+1}. {msg}" for i, msg in enumerate(chosen))
+    body += "\n\n— Твой EllisGuardBot 🤍"
+    await send_email(email, subject, body)
+    return f"Тестовое письмо отправлено на {email}! Проверь почту."
+
+
+async def handle_api_send_test_email(request):
+    try:
+        user_id = await api_auth_required(request)
+    except web.HTTPForbidden as e:
+        return e
+    msg = await send_test_email(user_id)
+    if "не указан" in msg:
+        return web.json_response({"error": msg}, status=400)
+    return web.json_response({"message": msg})
+
+
 async def handle_api_public_token_generate(request):
     try:
         user_id = await api_auth_required(request)
@@ -1243,6 +1292,7 @@ def setup_routes(app: web.Application):
     r.add_get('/api/v1/monitors/{id}/graph', handle_api_monitor_graph)
     r.add_get('/api/v1/incidents', handle_api_incidents)
     r.add_post('/api/v1/settings', handle_api_settings)
+    r.add_post('/api/v1/settings/test-email', handle_api_send_test_email)
     r.add_get('/api/v1/public/{token}', handle_api_public_page)
     r.add_post('/api/v1/public/token', handle_api_public_token_generate)
     r.add_get('/api/v1/export', handle_api_export)
@@ -1330,6 +1380,7 @@ def settings_kb():
         [InlineKeyboardButton(text="\U0001f4e7 Указать email", callback_data="set_email")],
         [InlineKeyboardButton(text="\U0001f514 Повтор уведомлений", callback_data="set_repeat")],
         [InlineKeyboardButton(text="\U0001f6e0 Техническое окно", callback_data="set_maintenance")],
+        [InlineKeyboardButton(text="\U0001f4e8 Тест email", callback_data="test_email")],
         [InlineKeyboardButton(text="\U0001f519 Назад", callback_data="menu_main")],
     ])
 
@@ -1880,6 +1931,13 @@ async def process_maintenance(message: Message, state: FSMContext):
     await message.answer(
         f"\U0001f6e0 Тех. окно: {parts[0]} \u2013 {parts[1]}", reply_markup=main_menu_kb()
     )
+
+
+@dp.callback_query(F.data == "test_email")
+async def test_email_handler(callback: CallbackQuery):
+    await callback.answer()
+    msg = await send_test_email(callback.from_user.id)
+    await callback.message.answer(msg, reply_markup=main_menu_kb())
 
 
 @dp.callback_query(F.data == "menu_premium")
