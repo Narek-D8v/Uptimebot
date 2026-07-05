@@ -522,10 +522,14 @@ async def heartbeat_handler(request):
             await db.execute("UPDATE monitors SET config = ? WHERE id = ?", (json.dumps(config), row[0]))
             await db.commit()
     return web.Response(text="OK")
-
+    
+async def handle_root(request):
+    return web.Response(text="Ellis is watching 👀")
+    
 async def start_heartbeat_server():
     app = web.Application()
     app.router.add_get('/{path:.*}', heartbeat_handler)
+    app.router.add_get('/', handle_root)
     app.router.add_post('/{path:.*}', heartbeat_handler)
     runner = web.AppRunner(app)
     await runner.setup()
