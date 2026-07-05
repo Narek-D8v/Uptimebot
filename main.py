@@ -1314,18 +1314,14 @@ async def generate_graph(monitor_id: int, hours: int, style: str = "line") -> Op
     return buf
 
 
-def _dashboard_button():
-    return [InlineKeyboardButton(text="\U0001f5a5 Dashboard",
-                                 web_app=WebAppInfo(url=f"{PUBLIC_URL}/webapp"))]
-
-
 def main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="\U0001f4cb Мои мониторы", callback_data="menu_list")],
         [InlineKeyboardButton(text="\u2795 Добавить монитор", callback_data="menu_add")],
         [InlineKeyboardButton(text="\u2699\ufe0f Настройки", callback_data="menu_settings")],
         [InlineKeyboardButton(text="\U0001f4b3 Premium", callback_data="menu_premium")],
-        [_dashboard_button()],
+        [InlineKeyboardButton(text="\U0001f5a5 Dashboard",
+                              web_app=WebAppInfo(url=f"{PUBLIC_URL}/webapp"))],
     ])
 
 
