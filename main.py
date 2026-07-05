@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -10,60 +11,64 @@ from typing import Optional
 
 import aiohttp
 import aiosqlite
+import aiosmtplib
+from email.message import EmailMessage
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode, ContentType
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile, LabeledPrice,
-    PreCheckoutQuery
+    BufferedInputFile, LabeledPrice, PreCheckoutQuery
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiohttp import web
 
-# ------------------------------
-# Конфигурация
-# ------------------------------
+# ---------- КОНФИГУРАЦИЯ ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("Переменная окружения BOT_TOKEN не задана!")
+    raise ValueError("BOT_TOKEN not set!")
 
 DATABASE = "uptime_bot.db"
-PORT = int(os.environ.get("PORT", 8080))          # Порт, который требует Render
-HEARTBEAT_HOST = "0.0.0.0"
-DEFAULT_INTERVAL = 300                              # 5 минут
-DEFAULT_TIMEOUT = 10                                # таймаут запроса
-CHECK_HISTORY_HOURS = 24
+PORT = int(os.environ.get("PORT", 8080))
+PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}").rstrip('/')
+
+DEFAULT_TIMEOUT = 10
 MAX_FREE_MONITORS = 3
 MAX_PREMIUM_MONITORS = 10
 PREMIUM_PRICE_STARS = 5
+MIN_INTERVAL_FREE = 60
+MIN_INTERVAL_PREMIUM = 30
+DEFAULT_INTERVAL = 300
 
-# Публичный URL сервиса (если запущен на Render, иначе localhost)
-PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
-# Убираем trailing slash
-PUBLIC_URL = PUBLIC_URL.rstrip('/')
+# SMTP
+SMTP_HOST = os.environ.get("SMTP_HOST")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SMTP_USER = os.environ.get("SMTP_USER")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+SMTP_FROM = os.environ.get("SMTP_FROM")
 
-# ------------------------------
-# Инициализация
-# ------------------------------
+# ---------- ИНИЦИАЛИЗАЦИЯ ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
-
-# Глобальный aiohttp сессия для HTTP/API/Keyword проверок (переиспользование)
 http_session: Optional[aiohttp.ClientSession] = None
 
-# ------------------------------
-# База данных
-# ------------------------------
+GREETINGS = [
+    "👋 Привет! Я Элис, твой страж сайтов и серверов. Всё под контролем!",
+    "🌙 Добро пожаловать! Я не сплю, пока твои сервисы работают.",
+    "✨ Здравствуй! Доверь мне мониторинг – я предупрежу, если что-то случится.",
+    "🛡 Приветствую! Я твой цифровой ангел-хранитель."
+]
+
+# ---------- БАЗА ДАННЫХ ----------
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute("PRAGMA journal_mode=WAL")
@@ -71,7 +76,9 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 chat_id INTEGER NOT NULL,
+                email TEXT,
                 monitor_limit INTEGER DEFAULT 3,
+                is_premium BOOLEAN DEFAULT 0,
                 alert_repeat INTEGER DEFAULT 0,
                 maintenance_from TEXT,
                 maintenance_to TEXT,
@@ -114,69 +121,70 @@ async def init_db():
 
 async def register_user(user_id: int, chat_id: int):
     async with aiosqlite.connect(DATABASE) as db:
+        limit = MAX_PREMIUM_MONITORS if user_id == 5457847440 else MAX_FREE_MONITORS
+        is_prem = 1 if user_id == 5457847440 else 0
         await db.execute(
-            "INSERT OR IGNORE INTO users (user_id, chat_id) VALUES (?, ?)",
-            (user_id, chat_id)
+            "INSERT OR IGNORE INTO users (user_id, chat_id, monitor_limit, is_premium) VALUES (?, ?, ?, ?)",
+            (user_id, chat_id, limit, is_prem)
         )
+        if user_id == 5457847440:
+            await db.execute("UPDATE users SET monitor_limit=?, is_premium=1 WHERE user_id=?", (MAX_PREMIUM_MONITORS, user_id))
         await db.commit()
 
 async def get_user(user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
+        async with db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)) as cur:
             return await cur.fetchone()
 
-async def set_user_limit(user_id: int, limit: int):
+async def set_user_email(user_id: int, email: str):
     async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("UPDATE users SET monitor_limit = ? WHERE user_id = ?", (limit, user_id))
+        await db.execute("UPDATE users SET email=? WHERE user_id=?", (email, user_id))
+        await db.commit()
+
+async def set_user_setting(user_id: int, setting: str, value):
+    async with aiosqlite.connect(DATABASE) as db:
+        if setting == "alert_repeat":
+            await db.execute("UPDATE users SET alert_repeat=? WHERE user_id=?", (int(value), user_id))
+        elif setting in ("maintenance_from", "maintenance_to"):
+            await db.execute(f"UPDATE users SET {setting}=? WHERE user_id=?", (value, user_id))
         await db.commit()
 
 async def get_active_monitor_count(user_id: int) -> int:
     async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM monitors WHERE user_id = ? AND is_paused = 0",
-            (user_id,)
-        ) as cur:
+        async with db.execute("SELECT COUNT(*) FROM monitors WHERE user_id=? AND is_paused=0", (user_id,)) as cur:
             row = await cur.fetchone()
             return row[0] if row else 0
 
 async def can_add_monitor(user_id: int) -> bool:
     count = await get_active_monitor_count(user_id)
-    limit = MAX_FREE_MONITORS
     user = await get_user(user_id)
-    if user:
-        limit = user[2]  # monitor_limit
+    limit = user[3] if user else MAX_FREE_MONITORS
     return count < limit
 
 async def add_monitor(user_id: int, monitor_type: str, name: str, config: dict, interval: int) -> int:
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "INSERT INTO monitors (user_id, type, name, config, interval_seconds) VALUES (?, ?, ?, ?, ?)",
+        cur = await db.execute(
+            "INSERT INTO monitors (user_id, type, name, config, interval_seconds) VALUES (?,?,?,?,?)",
             (user_id, monitor_type, name, json.dumps(config), interval)
         )
         await db.commit()
-        return cursor.lastrowid
+        return cur.lastrowid
 
 async def delete_monitor(monitor_id: int, user_id: int) -> bool:
     async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute(
-            "DELETE FROM monitors WHERE id = ? AND user_id = ?",
-            (monitor_id, user_id)
-        )
+        cur = await db.execute("DELETE FROM monitors WHERE id=? AND user_id=?", (monitor_id, user_id))
         await db.commit()
-        return cursor.rowcount > 0
+        return cur.rowcount > 0
 
 async def get_monitor(monitor_id: int, user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
-        async with db.execute(
-            "SELECT * FROM monitors WHERE id = ? AND user_id = ?",
-            (monitor_id, user_id)
-        ) as cur:
+        async with db.execute("SELECT * FROM monitors WHERE id=? AND user_id=?", (monitor_id, user_id)) as cur:
             return await cur.fetchone()
 
 async def get_user_monitors(user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
         async with db.execute(
-            "SELECT id, type, name, config, interval_seconds, is_paused, is_up, last_checked FROM monitors WHERE user_id = ?",
+            "SELECT id, type, name, config, interval_seconds, is_paused, is_up, last_checked FROM monitors WHERE user_id=?",
             (user_id,)
         ) as cur:
             return await cur.fetchall()
@@ -184,48 +192,42 @@ async def get_user_monitors(user_id: int):
 async def get_all_active_monitors():
     async with aiosqlite.connect(DATABASE) as db:
         async with db.execute(
-            "SELECT m.id, m.user_id, m.type, m.config, m.interval_seconds, m.last_checked, m.is_up, m.alert_until, u.chat_id, u.alert_repeat, u.maintenance_from, u.maintenance_to "
-            "FROM monitors m JOIN users u ON m.user_id = u.user_id WHERE m.is_paused = 0"
+            "SELECT m.id, m.user_id, m.type, m.config, m.interval_seconds, m.last_checked, m.is_up, m.alert_until, u.chat_id, u.alert_repeat, u.maintenance_from, u.maintenance_to, u.is_premium "
+            "FROM monitors m JOIN users u ON m.user_id=u.user_id WHERE m.is_paused=0"
         ) as cur:
             return await cur.fetchall()
 
 async def update_monitor_status(monitor_id: int, is_up: bool, status_text: str, response_time_ms: float, details: str = ""):
     async with aiosqlite.connect(DATABASE) as db:
         await db.execute(
-            "UPDATE monitors SET last_status = ?, is_up = ?, last_checked = ?, consecutive_failures = CASE WHEN ? THEN 0 ELSE consecutive_failures + 1 END WHERE id = ?",
+            "UPDATE monitors SET last_status=?, is_up=?, last_checked=?, consecutive_failures=CASE WHEN ? THEN 0 ELSE consecutive_failures+1 END WHERE id=?",
             (status_text, is_up, datetime.utcnow(), is_up, monitor_id)
         )
         await db.execute(
-            "INSERT INTO checks (monitor_id, status_code, response_time_ms, is_up, details) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO checks (monitor_id, status_code, response_time_ms, is_up, details) VALUES (?,?,?,?,?)",
             (monitor_id, 0 if not isinstance(status_text, int) else status_text, response_time_ms, is_up, details)
         )
         await db.commit()
 
 async def set_monitor_pause(monitor_id: int, user_id: int, paused: bool):
     async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("UPDATE monitors SET is_paused = ? WHERE id = ? AND user_id = ?", (int(paused), monitor_id, user_id))
+        await db.execute("UPDATE monitors SET is_paused=? WHERE id=? AND user_id=?", (int(paused), monitor_id, user_id))
         await db.commit()
 
 async def get_monitor_stats(monitor_id: int, hours: int):
     since = datetime.utcnow() - timedelta(hours=hours)
     async with aiosqlite.connect(DATABASE) as db:
         async with db.execute(
-            "SELECT COUNT(*), SUM(is_up), AVG(response_time_ms) FROM checks WHERE monitor_id = ? AND checked_at >= ?",
+            "SELECT COUNT(*), SUM(is_up), AVG(response_time_ms) FROM checks WHERE monitor_id=? AND checked_at>=?",
             (monitor_id, since)
         ) as cur:
             total, up_count, avg_resp = await cur.fetchone()
         if total == 0:
             return {"total": 0, "uptime": 100.0, "avg_response_time": 0}
         uptime = (up_count / total) * 100 if total else 100.0
-        return {
-            "total": total,
-            "uptime": round(uptime, 2),
-            "avg_response_time": round(avg_resp, 1) if avg_resp else 0
-        }
+        return {"total": total, "uptime": round(uptime, 2), "avg_response_time": round(avg_resp, 1) if avg_resp else 0}
 
-# ------------------------------
-# Проверки всех типов
-# ------------------------------
+# ---------- ПРОВЕРКИ ----------
 async def check_http(config: dict) -> tuple:
     url = config["url"]
     expected_status = config.get("expected_status", 200)
@@ -245,7 +247,7 @@ async def check_http(config: dict) -> tuple:
 async def check_keyword(config: dict) -> tuple:
     url = config["url"]
     keyword = config["keyword"]
-    mode = config.get("mode", "present")  # present/absent
+    mode = config.get("mode", "present")
     timeout = config.get("timeout", DEFAULT_TIMEOUT)
     start = time.monotonic()
     try:
@@ -254,8 +256,7 @@ async def check_keyword(config: dict) -> tuple:
             resp_time = (time.monotonic() - start) * 1000
             found = keyword in body
             is_up = (found if mode == "present" else not found)
-            status_text = f"Keyword {'found' if found else 'not found'}"
-            return is_up, status_text, resp_time, f"Status: {resp.status}"
+            return is_up, f"Keyword {'found' if found else 'not found'}", resp_time, f"Status: {resp.status}"
     except Exception as e:
         resp_time = (time.monotonic() - start) * 1000
         return False, str(e), resp_time, str(e)
@@ -387,18 +388,13 @@ class UDPEchoClientProtocol(asyncio.DatagramProtocol):
         self.transport = None
         self.response = None
         self.received_event = asyncio.Event()
-        self.expected = expected
-
     def connection_made(self, transport):
         self.transport = transport
-
     def datagram_received(self, data, addr):
         self.response = data
         self.received_event.set()
-
     def error_received(self, exc):
         self.received_event.set()
-
     def connection_lost(self, exc):
         self.received_event.set()
 
@@ -438,24 +434,41 @@ async def perform_check(monitor_id: int, monitor_type: str, config: dict) -> tup
     else:
         return False, f"Unknown type {monitor_type}", 0, ""
 
-# ------------------------------
-# Планировщик
-# ------------------------------
+# ---------- EMAIL ----------
+async def send_email(to_email: str, subject: str, body: str):
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD]):
+        logging.warning("SMTP not configured")
+        return
+    msg = EmailMessage()
+    msg["From"] = SMTP_FROM
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body, charset="utf-8")
+    try:
+        await aiosmtplib.send(msg, hostname=SMTP_HOST, port=SMTP_PORT,
+                              username=SMTP_USER, password=SMTP_PASSWORD,
+                              start_tls=True)
+        logging.info(f"Email sent to {to_email}")
+    except Exception as e:
+        logging.error(f"Email error: {e}")
+
+# ---------- ПЛАНИРОВЩИК ----------
 async def scheduler_loop():
     global http_session
-    http_session = aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
-        connector=aiohttp.TCPConnector(limit=50, limit_per_host=10, ttl_dns_cache=300)
-    )
+    http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
+                                        connector=aiohttp.TCPConnector(limit=50, limit_per_host=10, ttl_dns_cache=300))
     sem = asyncio.Semaphore(50)
     while True:
         try:
             monitors = await get_all_active_monitors()
+            # сортировка: премиум мониторы первыми
+            monitors.sort(key=lambda m: m[12], reverse=True)  # is_premium в индексе 12
             now = datetime.utcnow()
             tasks = []
             for mon in monitors:
                 (mid, user_id, mtype, config_json, interval, last_checked,
-                 prev_is_up, alert_until, chat_id, alert_repeat, maint_from, maint_to) = mon
+                 prev_is_up, alert_until, chat_id, alert_repeat,
+                 maint_from, maint_to, is_premium) = mon
                 if last_checked:
                     last = datetime.fromisoformat(last_checked) if isinstance(last_checked, str) else last_checked
                     next_check = last + timedelta(seconds=interval)
@@ -465,15 +478,15 @@ async def scheduler_loop():
                 if maint_from and maint_to:
                     try:
                         now_time = now.time()
-                        from_time = datetime.strptime(maint_from, "%H:%M").time()
-                        to_time = datetime.strptime(maint_to, "%H:%M").time()
-                        if from_time <= to_time:
-                            in_maintenance = from_time <= now_time <= to_time
+                        from_t = datetime.strptime(maint_from, "%H:%M").time()
+                        to_t = datetime.strptime(maint_to, "%H:%M").time()
+                        if from_t <= to_t:
+                            in_maintenance = from_t <= now_time <= to_t
                         else:
-                            in_maintenance = now_time >= from_time or now_time <= to_time
+                            in_maintenance = now_time >= from_t or now_time <= to_t
                     except:
                         pass
-                tasks.append(check_and_notify(mid, mtype, json.loads(config_json), chat_id,
+                tasks.append(check_and_notify(mid, user_id, mtype, json.loads(config_json), chat_id,
                                               prev_is_up, alert_until, alert_repeat, in_maintenance, sem))
             if tasks:
                 await asyncio.gather(*tasks)
@@ -481,7 +494,7 @@ async def scheduler_loop():
             logging.error(f"Scheduler error: {e}")
         await asyncio.sleep(15)
 
-async def check_and_notify(mid, mtype, config, chat_id, prev_is_up, alert_until, alert_repeat, in_maintenance, sem):
+async def check_and_notify(mid, user_id, mtype, config, chat_id, prev_is_up, alert_until, alert_repeat, in_maintenance, sem):
     async with sem:
         is_up, status_text, resp_time, details = await perform_check(mid, mtype, config)
         await update_monitor_status(mid, is_up, status_text, resp_time, details)
@@ -498,20 +511,30 @@ async def check_and_notify(mid, mtype, config, chat_id, prev_is_up, alert_until,
                     await bot.send_message(chat_id, text)
                 except Exception as e:
                     logging.error(f"Notify error: {e}")
+                # Email уведомление
+                user = await get_user(user_id)
+                if user and user[2]:
+                    subject = f"{'✅ UP' if is_up else '🔴 DOWN'}: {mtype.upper()} монитор"
+                    body = f"Монитор {mtype} \"{config.get('name', mid)}\"\n"
+                    body += f"Статус: {status_text}\n"
+                    body += f"Время: {now.isoformat()}\n"
+                    body += "\nС уважением, Элис"
+                    asyncio.create_task(send_email(user[2], subject, body))
             if not is_up and alert_repeat > 0:
                 async with aiosqlite.connect(DATABASE) as db:
-                    await db.execute("UPDATE monitors SET alert_until = ? WHERE id = ?",
-                                     (datetime.utcnow() + timedelta(minutes=alert_repeat), mid))
+                    await db.execute("UPDATE monitors SET alert_until=? WHERE id=?",
+                                     (now + timedelta(minutes=alert_repeat), mid))
                     await db.commit()
 
-# ------------------------------
-# Heartbeat веб-сервер
-# ------------------------------
-async def heartbeat_handler(request):
+# ---------- HEARTBEAT СЕРВЕР ----------
+async def handle_root(request):
+    return web.Response(text="Ellis is watching 👀")
+
+async def handle_heartbeat(request):
     path = request.match_info['path']
     async with aiosqlite.connect(DATABASE) as db:
         async with db.execute(
-            "SELECT id, config FROM monitors WHERE type='heartbeat' AND json_extract(config, '$.path') = ?",
+            "SELECT id, config FROM monitors WHERE type='heartbeat' AND json_extract(config, '$.path')=?",
             (path,)
         ) as cur:
             row = await cur.fetchone()
@@ -519,52 +542,56 @@ async def heartbeat_handler(request):
                 return web.Response(text="Not found", status=404)
             config = json.loads(row[1])
             config['last_heartbeat'] = datetime.utcnow().isoformat()
-            await db.execute("UPDATE monitors SET config = ? WHERE id = ?", (json.dumps(config), row[0]))
+            await db.execute("UPDATE monitors SET config=? WHERE id=?", (json.dumps(config), row[0]))
             await db.commit()
     return web.Response(text="OK")
-    
-async def handle_root(request):
-    return web.Response(text="Ellis is watching 👀")
-    
+
 async def start_heartbeat_server():
     app = web.Application()
-    app.router.add_get('/{path:.*}', heartbeat_handler)
     app.router.add_get('/', handle_root)
-    app.router.add_post('/{path:.*}', heartbeat_handler)
+    app.router.add_post('/', handle_root)
+    app.router.add_get('/{path:.*}', handle_heartbeat)
+    app.router.add_post('/{path:.*}', handle_heartbeat)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, HEARTBEAT_HOST, PORT)
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logging.info(f"Heartbeat server started on port {PORT}")
+    logging.info(f"Heartbeat server on port {PORT}")
 
-# ------------------------------
-# Графики
-# ------------------------------
-async def generate_uptime_graph(monitor_id: int, hours: int) -> Optional[BytesIO]:
+# ---------- ГРАФИКИ ----------
+async def generate_graph(monitor_id: int, hours: int, style: str = "line") -> Optional[BytesIO]:
     since = datetime.utcnow() - timedelta(hours=hours)
     async with aiosqlite.connect(DATABASE) as db:
         async with db.execute(
-            "SELECT checked_at, response_time_ms, is_up FROM checks WHERE monitor_id = ? AND checked_at >= ? ORDER BY checked_at",
+            "SELECT checked_at, response_time_ms, is_up FROM checks WHERE monitor_id=? AND checked_at>=? ORDER BY checked_at",
             (monitor_id, since)
         ) as cur:
             rows = await cur.fetchall()
     if not rows:
         return None
     times = [datetime.fromisoformat(r[0]) for r in rows]
-    response_times = [r[1] if r[1] else 0 for r in rows]
+    resp_times = [r[1] if r[1] else 0 for r in rows]
     is_up = [r[2] for r in rows]
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
-    ax1.plot(times, response_times, color='blue', marker='.', linestyle='-', linewidth=1, markersize=2)
-    ax1.set_ylabel('Response time (ms)')
-    ax1.grid(True, linestyle='--', alpha=0.6)
-
-    for i in range(len(times) - 1):
-        color = 'green' if is_up[i] else 'red'
-        ax2.axvspan(times[i], times[i+1], facecolor=color, alpha=0.3)
-    ax2.set_ylabel('Status')
-    ax2.set_xlabel('Time')
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    if style == "line":
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(times, resp_times, color='blue', marker='.', linestyle='-', linewidth=1, markersize=2)
+        ax.set_ylabel('Response time (ms)')
+        ax.grid(True, linestyle='--', alpha=0.6)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    elif style == "status":
+        fig, ax = plt.subplots(figsize=(10, 2))
+        for i in range(len(times) - 1):
+            color = 'green' if is_up[i] else 'red'
+            ax.axvspan(times[i], times[i+1], facecolor=color, alpha=0.3)
+        ax.set_ylabel('Status')
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    elif style == "pie":
+        up_count = sum(is_up)
+        down_count = len(is_up) - up_count
+        fig, ax = plt.subplots()
+        ax.pie([up_count, down_count], labels=['Up', 'Down'], colors=['#2ecc71', '#e74c3c'], autopct='%1.1f%%', startangle=90)
+        ax.axis('equal')
     plt.tight_layout()
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=100)
@@ -572,10 +599,8 @@ async def generate_uptime_graph(monitor_id: int, hours: int) -> Optional[BytesIO
     buf.seek(0)
     return buf
 
-# ------------------------------
-# Клавиатуры
-# ------------------------------
-def main_menu_keyboard():
+# ---------- КЛАВИАТУРЫ ----------
+def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мои мониторы", callback_data="menu_list")],
         [InlineKeyboardButton(text="➕ Добавить монитор", callback_data="menu_add")],
@@ -583,34 +608,37 @@ def main_menu_keyboard():
         [InlineKeyboardButton(text="💳 Premium", callback_data="menu_premium")],
     ])
 
+def settings_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📧 Указать email", callback_data="set_email")],
+        [InlineKeyboardButton(text="⏰ Повтор уведомлений", callback_data="set_repeat")],
+        [InlineKeyboardButton(text="🛠 Техническое окно", callback_data="set_maintenance")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_main")],
+    ])
+
+def premium_menu(is_premium: bool):
+    kb = InlineKeyboardBuilder()
+    if not is_premium:
+        kb.button(text=f"⭐ Купить за {PREMIUM_PRICE_STARS} Stars", callback_data="buy_premium")
+    else:
+        kb.button(text="✅ У вас Premium", callback_data="noop")
+    kb.button(text="🔙 Назад", callback_data="menu_main")
+    return kb.as_markup()
+
 def monitor_types_keyboard():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🌐 HTTP(s)", callback_data="addtype_http")
-    kb.button(text="🔍 Keyword", callback_data="addtype_keyword")
-    kb.button(text="📡 Ping", callback_data="addtype_ping")
-    kb.button(text="🔌 Port", callback_data="addtype_port")
-    kb.button(text="💓 Heartbeat", callback_data="addtype_heartbeat")
-    kb.button(text="🌍 DNS", callback_data="addtype_dns")
-    kb.button(text="⚙️ API", callback_data="addtype_api")
-    kb.button(text="📦 UDP", callback_data="addtype_udp")
+    types = [("🌐 HTTP(s)", "http"), ("🔍 Keyword", "keyword"), ("📡 Ping", "ping"),
+             ("🔌 Port", "port"), ("💓 Heartbeat", "heartbeat"), ("🌍 DNS", "dns"),
+             ("⚙️ API", "api"), ("📦 UDP", "udp")]
+    for text, data in types:
+        kb.button(text=text, callback_data=f"addtype_{data}")
     kb.adjust(2)
     return kb.as_markup()
 
-def back_button(callback_data: str = "menu_list"):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data=callback_data)]])
+def back_to_main():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu_main")]])
 
-def monitor_card_keyboard(monitor_id: int, is_paused: bool):
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⏸ Пауза" if not is_paused else "▶️ Возобновить", callback_data=f"pause_{monitor_id}")
-    kb.button(text="🔄 Проверить", callback_data=f"check_{monitor_id}")
-    kb.button(text="📈 График", callback_data=f"graph_{monitor_id}")
-    kb.button(text="❌ Удалить", callback_data=f"delete_{monitor_id}")
-    kb.adjust(2)
-    return kb.as_markup()
-
-# ------------------------------
-# FSM для добавления
-# ------------------------------
+# ---------- FSM ----------
 class AddMonitor(StatesGroup):
     choosing_type = State()
     entering_name = State()
@@ -618,47 +646,51 @@ class AddMonitor(StatesGroup):
     entering_interval = State()
     confirm = State()
 
-# ------------------------------
-# Обработчики команд
-# ------------------------------
+class Settings(StatesGroup):
+    waiting_for_email = State()
+    waiting_for_repeat = State()
+    waiting_for_maintenance = State()
+
+# ---------- ОБРАБОТЧИКИ ----------
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await register_user(message.from_user.id, message.chat.id)
-    await message.answer(
-        "👋 Привет! Я бот мониторинга сайтов и сервисов.\n"
-        "Выберите действие:",
-        reply_markup=main_menu_keyboard()
-    )
+    greeting = random.choice(GREETINGS)
+    await message.answer(greeting, reply_markup=main_menu())
+
+@dp.callback_query(F.data == "menu_main")
+async def back_to_main_callback(callback: CallbackQuery):
+    await callback.message.edit_text("Главное меню", reply_markup=main_menu())
+    await callback.answer()
 
 @dp.callback_query(F.data == "menu_list")
-async def show_list(callback: CallbackQuery):
+async def list_monitors(callback: CallbackQuery):
     user_id = callback.from_user.id
     monitors = await get_user_monitors(user_id)
-    count = len([m for m in monitors if not m[5]])  # не на паузе
-    limit = MAX_FREE_MONITORS
     user = await get_user(user_id)
-    if user:
-        limit = user[2]
-    text = f"📊 Активно: {count}/{limit}\n\n"
+    limit = user[3] if user else MAX_FREE_MONITORS
+    active = len([m for m in monitors if not m[5]])
+    text = f"📊 Активно: {active}/{limit}\n"
     if not monitors:
-        text += "У вас нет мониторов."
-        await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+        text += "У вас нет мониторов. Добавьте первый!"
+        await callback.message.edit_text(text, reply_markup=main_menu())
+        await callback.answer()
         return
     for m in monitors:
-        mid, mtype, name, config_json, interval, paused, is_up, last_checked = m
+        mid, mtype, name, _, interval, paused, is_up, last_checked = m
         icon = "🟢" if is_up else "🔴" if is_up is False else "⚪️"
         paused_str = " (пауза)" if paused else ""
         last = last_checked[:19] if last_checked else "никогда"
         text += f"{icon} <b>{name or mid}</b> [{mtype}]{paused_str}\n"
-        text += f"   Последняя проверка: {last}\n"
-        text += f"   Интервал: {interval}с\n\n"
-    await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
+        text += f"⏱ {interval}с | {last}\n"
+    await callback.message.edit_text(text, reply_markup=main_menu())
     await callback.answer()
 
+# Добавление монитора
 @dp.callback_query(F.data == "menu_add")
 async def start_add(callback: CallbackQuery, state: FSMContext):
     if not await can_add_monitor(callback.from_user.id):
-        await callback.answer("Лимит мониторов исчерпан. Перейдите на Premium.", show_alert=True)
+        await callback.answer("Лимит мониторов исчерпан. Получите Premium.", show_alert=True)
         return
     await state.set_state(AddMonitor.choosing_type)
     await callback.message.edit_text("Выберите тип монитора:", reply_markup=monitor_types_keyboard())
@@ -669,7 +701,7 @@ async def process_type(callback: CallbackQuery, state: FSMContext):
     mtype = callback.data.split("_")[1]
     await state.update_data(type=mtype)
     await state.set_state(AddMonitor.entering_name)
-    await callback.message.edit_text("Введите название монитора (или отправьте `-` для автоматического):", reply_markup=back_button())
+    await callback.message.edit_text("Введите название (или `-` для авто):", reply_markup=back_to_main())
     await callback.answer()
 
 @dp.message(AddMonitor.entering_name)
@@ -678,39 +710,34 @@ async def process_name(message: Message, state: FSMContext):
     if name == "-":
         name = None
     await state.update_data(name=name)
-    await state.set_state(AddMonitor.entering_config)
     data = await state.get_data()
-    mtype = data["type"]
     prompts = {
-        "http": "Введите URL (https://example.com) и ожидаемый статус (200) через пробел, или только URL.",
-        "keyword": "Введите URL и ключевое слово через пробел (режим present/absent опционально).",
-        "ping": "Введите хост или IP.",
-        "port": "Введите хост и порт через пробел (например, smtp.example.com 587).",
-        "heartbeat": f"Отправьте путь (латиница, цифры, дефис) или '-' для авто-генерации.\nHeartbeat URL будет: {PUBLIC_URL}/<путь>",
-        "dns": "Введите домен, тип записи (A, AAAA, MX...) и опционально ожидаемое значение через пробел.",
-        "api": "Введите URL, JSONPath и ожидаемое значение через пробел.",
-        "udp": "Введите хост, порт и опционально отправляемые данные и ожидаемый ответ через пробел.",
+        "http": "Введите URL и ожидаемый статус (по умолчанию 200) через пробел:",
+        "keyword": "Введите URL ключевое_слово [present/absent]:",
+        "ping": "Введите хост или IP:",
+        "port": "Введите хост порт:",
+        "heartbeat": f"Введите путь (или '-' для авто). URL: {PUBLIC_URL}/<путь>\nМожно добавить макс. интервал (сек):",
+        "dns": "Введите домен, тип_записи [ожидаемое_значение]:",
+        "api": "Введите URL JSONPath [ожидаемое_значение]:",
+        "udp": "Введите хост порт [данные] [ожидаемый_ответ]:",
     }
-    await message.answer(prompts.get(mtype, "Введите параметры конфигурации."))
+    await message.answer(prompts[data['type']])
+    await state.set_state(AddMonitor.entering_config)
 
 @dp.message(AddMonitor.entering_config)
 async def process_config(message: Message, state: FSMContext):
     data = await state.get_data()
-    mtype = data["type"]
+    mtype = data['type']
     args = message.text.strip().split()
     config = {}
     try:
         if mtype == "http":
-            url = args[0]
-            config["url"] = url
+            config["url"] = args[0]
             config["expected_status"] = int(args[1]) if len(args) > 1 else 200
         elif mtype == "keyword":
-            url = args[0]
-            if len(args) < 2:
-                raise ValueError("Не указано ключевое слово")
-            config["url"] = url
-            config["keyword"] = args[1] if len(args) >= 2 else ""
-            config["mode"] = args[2] if len(args) >= 3 and args[2] in ("present", "absent") else "present"
+            config["url"] = args[0]
+            config["keyword"] = args[1]
+            config["mode"] = args[2] if len(args) > 2 and args[2] in ("present","absent") else "present"
         elif mtype == "ping":
             config["host"] = args[0]
         elif mtype == "port":
@@ -735,38 +762,37 @@ async def process_config(message: Message, state: FSMContext):
             config["send_data"] = args[2] if len(args) > 2 else ""
             config["expected_response"] = args[3] if len(args) > 3 else None
         else:
-            raise ValueError("Неизвестный тип")
+            raise ValueError
     except Exception as e:
-        await message.answer(f"❌ Ошибка в параметрах: {e}\nПопробуйте снова.")
+        await message.answer(f"❌ Ошибка параметров: {e}. Попробуйте снова.")
         return
     await state.update_data(config=config)
     await state.set_state(AddMonitor.entering_interval)
-    await message.answer("Введите интервал проверки в секундах (минимум 60):", reply_markup=back_button())
+    min_int = MIN_INTERVAL_PREMIUM if (await get_user(message.from_user.id))[4] else MIN_INTERVAL_FREE
+    await message.answer(f"Введите интервал проверки в секундах (мин. {min_int}):", reply_markup=back_to_main())
 
 @dp.message(AddMonitor.entering_interval)
 async def process_interval(message: Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
+    min_interval = MIN_INTERVAL_PREMIUM if user[4] else MIN_INTERVAL_FREE
     try:
         interval = int(message.text)
-        if interval < 60:
+        if interval < min_interval:
             raise ValueError
     except:
-        await message.answer("Интервал должен быть числом не менее 60 секунд.")
+        await message.answer(f"Интервал должен быть числом не менее {min_interval} секунд.")
         return
     await state.update_data(interval=interval)
     data = await state.get_data()
-    mtype = data["type"]
-    name = data.get("name", "Без имени")
-    config = data["config"]
-    text = f"<b>Подтверждение:</b>\nТип: {mtype}\nНазвание: {name}\n"
-    if mtype == "heartbeat":
-        text += f"Путь: {config['path']}\nМакс. интервал: {config['max_interval']}с\n"
-        text += f"URL heartbeat: {PUBLIC_URL}/{config['path']}\n"
+    text = f"<b>Подтверждение</b>\nТип: {data['type']}\nНазвание: {data.get('name', 'авто')}\n"
+    if data['type'] == 'heartbeat':
+        text += f"Heartbeat URL: {PUBLIC_URL}/{data['config']['path']}\n"
     else:
-        text += f"Параметры: {json.dumps(config, indent=2)}\n"
+        text += f"Параметры: {json.dumps(data['config'], indent=2)}\n"
     text += f"Интервал: {interval}с"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Сохранить", callback_data="save_monitor"),
-         InlineKeyboardButton(text="❌ Отмена", callback_data="menu_list")]
+         InlineKeyboardButton(text="❌ Отмена", callback_data="menu_main")]
     ])
     await state.set_state(AddMonitor.confirm)
     await message.answer(text, reply_markup=kb)
@@ -776,153 +802,184 @@ async def save_monitor(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
     if not await can_add_monitor(user_id):
-        await callback.answer("Лимит мониторов исчерпан.", show_alert=True)
+        await callback.answer("Лимит исчерпан.", show_alert=True)
         return
-    mtype = data["type"]
-    name = data.get("name", f"Monitor {mtype}")
-    config = data["config"]
-    interval = data["interval"]
-    monitor_id = await add_monitor(user_id, mtype, name, config, interval)
+    mid = await add_monitor(user_id, data['type'], data.get('name', f"Monitor {data['type']}"), data['config'], data['interval'])
     await state.clear()
-    await callback.message.edit_text(f"✅ Монитор <b>{name}</b> (ID: {monitor_id}) добавлен.", reply_markup=main_menu_keyboard())
+    await callback.message.edit_text(f"✅ Монитор добавлен (ID: {mid})", reply_markup=main_menu())
     await callback.answer()
 
+# Пауза/возобновление, проверка, удаление, графики
 @dp.callback_query(F.data.startswith("pause_"))
 async def toggle_pause(callback: CallbackQuery):
     monitor_id = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
-    mon = await get_monitor(monitor_id, user_id)
+    mon = await get_monitor(monitor_id, callback.from_user.id)
     if not mon:
-        await callback.answer("Монитор не найден", show_alert=True)
+        await callback.answer("Не найден", show_alert=True)
         return
     new_paused = not mon[6]
-    await set_monitor_pause(monitor_id, user_id, new_paused)
-    await callback.answer(f"Монитор {'приостановлен' if new_paused else 'возобновлён'}")
-    await show_list(callback)
+    await set_monitor_pause(monitor_id, callback.from_user.id, new_paused)
+    await callback.answer(f"{'Приостановлен' if new_paused else 'Возобновлён'}")
+    await list_monitors(callback)
 
 @dp.callback_query(F.data.startswith("check_"))
 async def manual_check(callback: CallbackQuery):
     monitor_id = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
-    mon = await get_monitor(monitor_id, user_id)
+    mon = await get_monitor(monitor_id, callback.from_user.id)
     if not mon:
-        await callback.answer("Монитор не найден", show_alert=True)
+        await callback.answer("Не найден", show_alert=True)
         return
-    mtype = mon[2]
-    config = json.loads(mon[4])
-    is_up, status_text, resp_time, details = await perform_check(monitor_id, mtype, config)
-    await update_monitor_status(monitor_id, is_up, status_text, resp_time, details)
+    is_up, status_text, resp_time, _ = await perform_check(monitor_id, mon[2], json.loads(mon[4]))
+    await update_monitor_status(monitor_id, is_up, status_text, resp_time, "")
     await callback.message.answer(
-        f"🔄 Результат проверки монитора {mon[3] or monitor_id}:\n"
-        f"Статус: {'🟢 UP' if is_up else '🔴 DOWN'}\n"
-        f"Время ответа: {resp_time:.0f} мс\n"
-        f"Детали: {status_text}"
+        f"🔄 Результат проверки\nСтатус: {'🟢 UP' if is_up else '🔴 DOWN'}\n"
+        f"Время ответа: {resp_time:.0f} мс\n{status_text}"
     )
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("delete_"))
-async def delete_monitor_callback(callback: CallbackQuery):
+async def delete_monitor_cmd(callback: CallbackQuery):
     monitor_id = int(callback.data.split("_")[1])
-    user_id = callback.from_user.id
-    if await delete_monitor(monitor_id, user_id):
-        await callback.answer("Монитор удалён")
-        await show_list(callback)
+    if await delete_monitor(monitor_id, callback.from_user.id):
+        await callback.answer("Удалён")
+        await list_monitors(callback)
     else:
-        await callback.answer("Ошибка удаления", show_alert=True)
+        await callback.answer("Ошибка", show_alert=True)
 
 @dp.callback_query(F.data.startswith("graph_"))
-async def show_graph_menu(callback: CallbackQuery):
+async def graph_menu(callback: CallbackQuery):
     monitor_id = int(callback.data.split("_")[1])
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="24 часа", callback_data=f"graphdraw_{monitor_id}_24"),
-         InlineKeyboardButton(text="7 дней", callback_data=f"graphdraw_{monitor_id}_168"),
-         InlineKeyboardButton(text="30 дней", callback_data=f"graphdraw_{monitor_id}_720")],
+        [InlineKeyboardButton(text="📈 Линия (24ч)", callback_data=f"gdraw_{monitor_id}_24_line"),
+         InlineKeyboardButton(text="📊 Статус (24ч)", callback_data=f"gdraw_{monitor_id}_24_status")],
+        [InlineKeyboardButton(text="🥧 Круг (24ч)", callback_data=f"gdraw_{monitor_id}_24_pie")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_list")]
     ])
-    await callback.message.edit_text("Выберите период для графика:", reply_markup=kb)
+    await callback.message.edit_text("Выберите тип графика:", reply_markup=kb)
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("graphdraw_"))
+@dp.callback_query(F.data.startswith("gdraw_"))
 async def draw_graph(callback: CallbackQuery):
-    _, monitor_id_str, hours_str = callback.data.split("_")
-    monitor_id = int(monitor_id_str)
-    hours = int(hours_str)
-    buf = await generate_uptime_graph(monitor_id, hours)
+    _, mid, hours, style = callback.data.split("_")
+    buf = await generate_graph(int(mid), int(hours), style)
     if buf:
-        await callback.message.reply_photo(
-            photo=BufferedInputFile(buf.read(), filename="graph.png"),
-            caption=f"📈 Доступность за {hours} часов"
-        )
+        await callback.message.reply_photo(BufferedInputFile(buf.read(), filename="graph.png"))
     else:
-        await callback.answer("Недостаточно данных для графика", show_alert=True)
+        await callback.answer("Нет данных", show_alert=True)
     await callback.answer()
 
+# Настройки
 @dp.callback_query(F.data == "menu_settings")
-async def settings_menu(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = await get_user(user_id)
-    if not user:
-        return
-    limit = user[2]
-    text = f"⚙️ Настройки\nЛимит мониторов: {limit}\n"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏰ Повтор уведомлений (мин)", callback_data="set_repeat")],
-        [InlineKeyboardButton(text="🛠 Техническое окно", callback_data="set_maintenance")],
-        [InlineKeyboardButton(text="💳 Premium", callback_data="menu_premium")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_list")]
-    ])
-    await callback.message.edit_text(text, reply_markup=kb)
+async def show_settings(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id)
+    email = user[2] if user else "не указан"
+    repeat = user[5] if user else 0
+    maint = f"{user[6]} – {user[7]}" if user and user[6] else "не задано"
+    text = f"⚙️ Настройки\n\n📧 Email: {email}\n⏰ Повтор: каждые {repeat} мин.\n🛠 Тех. окно: {maint}"
+    await callback.message.edit_text(text, reply_markup=settings_menu())
     await callback.answer()
 
+@dp.callback_query(F.data == "set_email")
+async def set_email_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Settings.waiting_for_email)
+    await callback.message.edit_text("📧 Введите ваш email:", reply_markup=back_to_main())
+    await callback.answer()
+
+@dp.message(Settings.waiting_for_email)
+async def process_email(message: Message, state: FSMContext):
+    email = message.text.strip()
+    if "@" not in email or "." not in email:
+        await message.answer("Некорректный email. Попробуйте ещё раз:")
+        return
+    await set_user_email(message.from_user.id, email)
+    await state.clear()
+    await message.answer("✅ Email сохранён!", reply_markup=main_menu())
+
+@dp.callback_query(F.data == "set_repeat")
+async def set_repeat_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Settings.waiting_for_repeat)
+    await callback.message.edit_text("⏰ Введите интервал повтора в минутах (0 = без повтора):", reply_markup=back_to_main())
+    await callback.answer()
+
+@dp.message(Settings.waiting_for_repeat)
+async def process_repeat(message: Message, state: FSMContext):
+    try:
+        minutes = int(message.text)
+        if minutes < 0:
+            raise ValueError
+    except:
+        await message.answer("Введите целое неотрицательное число.")
+        return
+    await set_user_setting(message.from_user.id, "alert_repeat", minutes)
+    await state.clear()
+    await message.answer(f"🔔 Повтор каждые {minutes} мин.", reply_markup=main_menu())
+
+@dp.callback_query(F.data == "set_maintenance")
+async def set_maintenance_start(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Settings.waiting_for_maintenance)
+    await callback.message.edit_text("🛠 Введите начало и конец техокна в формате ЧЧ:ММ ЧЧ:ММ:", reply_markup=back_to_main())
+    await callback.answer()
+
+@dp.message(Settings.waiting_for_maintenance)
+async def process_maintenance(message: Message, state: FSMContext):
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        await message.answer("Нужно два времени через пробел.")
+        return
+    try:
+        datetime.strptime(parts[0], "%H:%M")
+        datetime.strptime(parts[1], "%H:%M")
+    except ValueError:
+        await message.answer("Неверный формат времени.")
+        return
+    await set_user_setting(message.from_user.id, "maintenance_from", parts[0])
+    await set_user_setting(message.from_user.id, "maintenance_to", parts[1])
+    await state.clear()
+    await message.answer(f"🛠 Тех. окно: {parts[0]} – {parts[1]}", reply_markup=main_menu())
+
+# Premium
 @dp.callback_query(F.data == "menu_premium")
 async def premium_info(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = await get_user(user_id)
-    limit = user[2] if user else MAX_FREE_MONITORS
-    if limit >= MAX_PREMIUM_MONITORS:
-        await callback.message.edit_text("У вас уже Premium (10 мониторов).", reply_markup=main_menu_keyboard())
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"⭐ Купить за {PREMIUM_PRICE_STARS} Stars", callback_data="buy_premium")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_settings")]
-    ])
-    await callback.message.edit_text(
-        f"Премиум даёт до {MAX_PREMIUM_MONITORS} мониторов. Стоимость: {PREMIUM_PRICE_STARS} Telegram Stars.",
-        reply_markup=kb
-    )
+    user = await get_user(callback.from_user.id)
+    is_prem = user[4] if user else 0
+    text = "💎 Premium\n" + ("У вас активен Premium. Спасибо!" if is_prem else f"Лимит {MAX_PREMIUM_MONITORS}, мин. интервал {MIN_INTERVAL_PREMIUM}с")
+    await callback.message.edit_text(text, reply_markup=premium_menu(is_prem))
     await callback.answer()
 
 @dp.callback_query(F.data == "buy_premium")
-async def initiate_payment(callback: CallbackQuery):
+async def buy_premium(callback: CallbackQuery):
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Premium UptimeBot",
-        description=f"Расширение лимита мониторов до {MAX_PREMIUM_MONITORS} (навсегда)",
+        description="До 10 мониторов",
         payload="premium_upgrade",
         provider_token="",
         currency="XTR",
-        prices=[LabeledPrice(label="Premium подписка", amount=PREMIUM_PRICE_STARS)],
-        start_parameter="uptime_premium"
+        prices=[LabeledPrice(label="Premium", amount=PREMIUM_PRICE_STARS)],
+        start_parameter="premium"
     )
-    await callback.answer("Счёт отправлен. Оплатите в следующем сообщении.")
+    await callback.answer("Счёт отправлен")
 
 @dp.pre_checkout_query()
-async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
+async def pre_checkout(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
 
 @dp.message(F.successful_payment)
 async def successful_payment(message: Message):
-    await set_user_limit(message.from_user.id, MAX_PREMIUM_MONITORS)
-    await message.answer("🎉 Спасибо! Лимит мониторов увеличен до 10.")
+    async with aiosqlite.connect(DATABASE) as db:
+        await db.execute("UPDATE users SET monitor_limit=?, is_premium=1 WHERE user_id=?",
+                         (MAX_PREMIUM_MONITORS, message.from_user.id))
+        await db.commit()
+    await message.answer("🎉 Вы Premium! Лимит увеличен до 10, интервал от 30с.", reply_markup=main_menu())
 
-# ------------------------------
-# Запуск
-# ------------------------------
+@dp.callback_query(F.data == "noop")
+async def noop(callback: CallbackQuery):
+    await callback.answer()
+
+# ---------- ЗАПУСК ----------
 async def on_startup():
     await init_db()
-    # Запускаем heartbeat-сервер на порту из переменной окружения
     asyncio.create_task(start_heartbeat_server())
-    # Запускаем планировщик
     asyncio.create_task(scheduler_loop())
 
 async def main():
