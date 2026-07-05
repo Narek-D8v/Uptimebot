@@ -3,7 +3,11 @@ let initData = '';
 let userData = null;
 let monitorsCache = [];
 let chartInstance = null;
-const AUDIO_CTX = window.AudioContext || window.webkitAudioContext;
+let _audioCtx = null;
+function getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return _audioCtx;
+}
 
 const Toast = {
   el: null,
@@ -18,7 +22,8 @@ const Toast = {
 
 function playBeep(freq = 880, duration = 200) {
   try {
-    const ctx = new AUDIO_CTX();
+    const ctx = getAudioCtx();
+    if (ctx.state === 'suspended') ctx.resume();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
@@ -206,6 +211,11 @@ async function renderDashboard(container) {
   try {
     const [stats, monitors] = await Promise.all([api('GET', '/stats'), api('GET', '/monitors')]);
     monitorsCache = monitors;
+    await Promise.allSettled(monitors.map(m =>
+      api('GET', `/monitors/${m.id}/checks?limit=50`).then(checks => {
+        m._sparkline = makeSparkline(checks);
+      }).catch(() => {})
+    ));
     const downCount = monitors.filter(m => m.is_up === false && !m.is_paused).length;
     let html = '<div class="stat-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">';
     html += `<div class="stat-card"><div class="stat-value">${stats.total}</div><div class="stat-label">Total</div></div>`;
@@ -447,7 +457,7 @@ async function loadChart(id) {
     if (!canvas) return;
     if (chartInstance) chartInstance.destroy();
     const ctx = canvas.getContext('2d');
-    const isDark = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim().includes('0f');
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const textColor = isDark ? '#e4e6f0' : '#1a1a2e';
     const gridColor = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
     if (chartStyle === 'pie') {
