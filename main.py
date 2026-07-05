@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -31,15 +32,24 @@ from aiohttp import web
 # ------------------------------
 # Конфигурация
 # ------------------------------
-BOT_TOKEN = os.environ.get('BOT_TOKEN')          # замените
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("Переменная окружения BOT_TOKEN не задана!")
+
 DATABASE = "uptime_bot.db"
-HEARTBEAT_PORT = 8080                 # порт для встроенного heartbeat-сервера
-DEFAULT_INTERVAL = 300                 # 5 минут
-DEFAULT_TIMEOUT = 10                   # таймаут запроса
+PORT = int(os.environ.get("PORT", 8080))          # Порт, который требует Render
+HEARTBEAT_HOST = "0.0.0.0"
+DEFAULT_INTERVAL = 300                              # 5 минут
+DEFAULT_TIMEOUT = 10                                # таймаут запроса
 CHECK_HISTORY_HOURS = 24
 MAX_FREE_MONITORS = 3
 MAX_PREMIUM_MONITORS = 10
-PREMIUM_PRICE_STARS = 5               # стоимость в Telegram Stars
+PREMIUM_PRICE_STARS = 5
+
+# Публичный URL сервиса (если запущен на Render, иначе localhost)
+PUBLIC_URL = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{PORT}")
+# Убираем trailing slash
+PUBLIC_URL = PUBLIC_URL.rstrip('/')
 
 # ------------------------------
 # Инициализация
@@ -131,7 +141,7 @@ async def get_active_monitor_count(user_id: int) -> int:
 
 async def can_add_monitor(user_id: int) -> bool:
     count = await get_active_monitor_count(user_id)
-    limit = 3
+    limit = MAX_FREE_MONITORS
     user = await get_user(user_id)
     if user:
         limit = user[2]  # monitor_limit
@@ -255,8 +265,7 @@ async def check_ping(config: dict) -> tuple:
     timeout = config.get("timeout", DEFAULT_TIMEOUT)
     start = time.monotonic()
     try:
-        # Используем системный ping (кроссплатформенно, требуется наличие ping)
-        if asyncio.get_event_loop().os.name == 'nt':
+        if os.name == 'nt':
             cmd = ["ping", "-n", "1", "-w", str(timeout*1000), host]
         else:
             cmd = ["ping", "-c", "1", "-W", str(timeout), host]
@@ -345,7 +354,6 @@ async def check_udp(config: dict) -> tuple:
     timeout = config.get("timeout", DEFAULT_TIMEOUT)
     start = time.monotonic()
     try:
-        # Простая реализация: отправляем UDP пакет и ждём ответ
         loop = asyncio.get_event_loop()
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: UDPEchoClientProtocol(expected_response),
@@ -354,7 +362,6 @@ async def check_udp(config: dict) -> tuple:
         try:
             protocol.send_data = send_data
             transport.sendto(send_data)
-            # Ждём ответ с таймаутом
             await asyncio.wait_for(protocol.received_event.wait(), timeout=timeout)
             resp_time = (time.monotonic() - start) * 1000
             if protocol.response:
@@ -395,10 +402,9 @@ class UDPEchoClientProtocol(asyncio.DatagramProtocol):
     def connection_lost(self, exc):
         self.received_event.set()
 
-# Для heartbeat проверки просто смотрим время последнего стука
 async def check_heartbeat(config: dict) -> tuple:
     last_heartbeat = config.get("last_heartbeat")
-    max_interval = config.get("max_interval", 600)  # секунд
+    max_interval = config.get("max_interval", 600)
     if not last_heartbeat:
         return False, "No heartbeat received", 0, ""
     try:
@@ -441,7 +447,7 @@ async def scheduler_loop():
         timeout=aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT),
         connector=aiohttp.TCPConnector(limit=50, limit_per_host=10, ttl_dns_cache=300)
     )
-    sem = asyncio.Semaphore(50)  # ограничение одновременных проверок
+    sem = asyncio.Semaphore(50)
     while True:
         try:
             monitors = await get_all_active_monitors()
@@ -455,7 +461,6 @@ async def scheduler_loop():
                     next_check = last + timedelta(seconds=interval)
                     if now < next_check:
                         continue
-                # Техническое окно: если сейчас время в пределах, проверку делаем, но уведомления подавляем
                 in_maintenance = False
                 if maint_from and maint_to:
                     try:
@@ -464,7 +469,7 @@ async def scheduler_loop():
                         to_time = datetime.strptime(maint_to, "%H:%M").time()
                         if from_time <= to_time:
                             in_maintenance = from_time <= now_time <= to_time
-                        else:  # перехлёст через полночь
+                        else:
                             in_maintenance = now_time >= from_time or now_time <= to_time
                     except:
                         pass
@@ -480,11 +485,10 @@ async def check_and_notify(mid, mtype, config, chat_id, prev_is_up, alert_until,
     async with sem:
         is_up, status_text, resp_time, details = await perform_check(mid, mtype, config)
         await update_monitor_status(mid, is_up, status_text, resp_time, details)
-        # Уведомление при смене статуса, если не техокно и не подавлено повторами
         if prev_is_up is not None and prev_is_up != is_up:
             now = datetime.utcnow()
             if alert_until and now < datetime.fromisoformat(alert_until):
-                return  # ещё не время повторного уведомления
+                return
             if not in_maintenance:
                 if is_up:
                     text = f"✅ <b>Восстановлен</b> {mtype.upper()} монитор\n{status_text}"
@@ -494,7 +498,6 @@ async def check_and_notify(mid, mtype, config, chat_id, prev_is_up, alert_until,
                     await bot.send_message(chat_id, text)
                 except Exception as e:
                     logging.error(f"Notify error: {e}")
-            # Если упал и включены повторы, ставим метку alert_until
             if not is_up and alert_repeat > 0:
                 async with aiosqlite.connect(DATABASE) as db:
                     await db.execute("UPDATE monitors SET alert_until = ? WHERE id = ?",
@@ -507,7 +510,6 @@ async def check_and_notify(mid, mtype, config, chat_id, prev_is_up, alert_until,
 async def heartbeat_handler(request):
     path = request.match_info['path']
     async with aiosqlite.connect(DATABASE) as db:
-        # Ищем монитор типа heartbeat с таким путём в config
         async with db.execute(
             "SELECT id, config FROM monitors WHERE type='heartbeat' AND json_extract(config, '$.path') = ?",
             (path,)
@@ -527,9 +529,9 @@ async def start_heartbeat_server():
     app.router.add_post('/{path:.*}', heartbeat_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', HEARTBEAT_PORT)
+    site = web.TCPSite(runner, HEARTBEAT_HOST, PORT)
     await site.start()
-    logging.info(f"Heartbeat server started on port {HEARTBEAT_PORT}")
+    logging.info(f"Heartbeat server started on port {PORT}")
 
 # ------------------------------
 # Графики
@@ -629,7 +631,7 @@ async def show_list(callback: CallbackQuery):
     user_id = callback.from_user.id
     monitors = await get_user_monitors(user_id)
     count = len([m for m in monitors if not m[5]])  # не на паузе
-    limit = 3
+    limit = MAX_FREE_MONITORS
     user = await get_user(user_id)
     if user:
         limit = user[2]
@@ -646,7 +648,6 @@ async def show_list(callback: CallbackQuery):
         text += f"{icon} <b>{name or mid}</b> [{mtype}]{paused_str}\n"
         text += f"   Последняя проверка: {last}\n"
         text += f"   Интервал: {interval}с\n\n"
-    # Пагинацию для простоты опускаем, при желании можно добавить
     await callback.message.edit_text(text, reply_markup=main_menu_keyboard())
     await callback.answer()
 
@@ -681,13 +682,12 @@ async def process_name(message: Message, state: FSMContext):
         "keyword": "Введите URL и ключевое слово через пробел (режим present/absent опционально).",
         "ping": "Введите хост или IP.",
         "port": "Введите хост и порт через пробел (например, smtp.example.com 587).",
-        "heartbeat": "Отправьте путь (латиница, цифры, дефис) или '-' для авто-генерации.",
+        "heartbeat": f"Отправьте путь (латиница, цифры, дефис) или '-' для авто-генерации.\nHeartbeat URL будет: {PUBLIC_URL}/<путь>",
         "dns": "Введите домен, тип записи (A, AAAA, MX...) и опционально ожидаемое значение через пробел.",
         "api": "Введите URL, JSONPath и ожидаемое значение через пробел.",
         "udp": "Введите хост, порт и опционально отправляемые данные и ожидаемый ответ через пробел.",
     }
     await message.answer(prompts.get(mtype, "Введите параметры конфигурации."))
-    await state.set_state(AddMonitor.entering_config)
 
 @dp.message(AddMonitor.entering_config)
 async def process_config(message: Message, state: FSMContext):
@@ -702,12 +702,8 @@ async def process_config(message: Message, state: FSMContext):
             config["expected_status"] = int(args[1]) if len(args) > 1 else 200
         elif mtype == "keyword":
             url = args[0]
-            # аргументы: URL, ключевое слово, [mode]
             if len(args) < 2:
                 raise ValueError("Не указано ключевое слово")
-            keyword = " ".join(args[1:]).split(" present")[0].split(" absent")[0]  # костыль, но для примера
-            # Проще ожидать, что пользователь введёт URL, потом ключевое слово, потом режим
-            # Но для демо делаем так
             config["url"] = url
             config["keyword"] = args[1] if len(args) >= 2 else ""
             config["mode"] = args[2] if len(args) >= 3 and args[2] in ("present", "absent") else "present"
@@ -754,14 +750,13 @@ async def process_interval(message: Message, state: FSMContext):
         return
     await state.update_data(interval=interval)
     data = await state.get_data()
-    # Формируем сводку
     mtype = data["type"]
     name = data.get("name", "Без имени")
     config = data["config"]
     text = f"<b>Подтверждение:</b>\nТип: {mtype}\nНазвание: {name}\n"
     if mtype == "heartbeat":
         text += f"Путь: {config['path']}\nМакс. интервал: {config['max_interval']}с\n"
-        text += f"URL heartbeat: http://<ваш_домен>:{HEARTBEAT_PORT}/{config['path']}\n"
+        text += f"URL heartbeat: {PUBLIC_URL}/{config['path']}\n"
     else:
         text += f"Параметры: {json.dumps(config, indent=2)}\n"
     text += f"Интервал: {interval}с"
@@ -796,10 +791,9 @@ async def toggle_pause(callback: CallbackQuery):
     if not mon:
         await callback.answer("Монитор не найден", show_alert=True)
         return
-    new_paused = not mon[6]  # is_paused
+    new_paused = not mon[6]
     await set_monitor_pause(monitor_id, user_id, new_paused)
     await callback.answer(f"Монитор {'приостановлен' if new_paused else 'возобновлён'}")
-    # Обновим сообщение, если надо, но для простоты заново вызовем список
     await show_list(callback)
 
 @dp.callback_query(F.data.startswith("check_"))
@@ -880,7 +874,7 @@ async def settings_menu(callback: CallbackQuery):
 async def premium_info(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = await get_user(user_id)
-    limit = user[2] if user else 3
+    limit = user[2] if user else MAX_FREE_MONITORS
     if limit >= MAX_PREMIUM_MONITORS:
         await callback.message.edit_text("У вас уже Premium (10 мониторов).", reply_markup=main_menu_keyboard())
         return
@@ -889,7 +883,7 @@ async def premium_info(callback: CallbackQuery):
         [InlineKeyboardButton(text="🔙 Назад", callback_data="menu_settings")]
     ])
     await callback.message.edit_text(
-        f"Премиум даёт до 10 мониторов. Стоимость: {PREMIUM_PRICE_STARS} Telegram Stars.",
+        f"Премиум даёт до {MAX_PREMIUM_MONITORS} мониторов. Стоимость: {PREMIUM_PRICE_STARS} Telegram Stars.",
         reply_markup=kb
     )
     await callback.answer()
@@ -899,9 +893,9 @@ async def initiate_payment(callback: CallbackQuery):
     await bot.send_invoice(
         chat_id=callback.from_user.id,
         title="Premium UptimeBot",
-        description="Расширение лимита мониторов до 10 (навсегда)",
+        description=f"Расширение лимита мониторов до {MAX_PREMIUM_MONITORS} (навсегда)",
         payload="premium_upgrade",
-        provider_token="",           # для Stars
+        provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label="Premium подписка", amount=PREMIUM_PRICE_STARS)],
         start_parameter="uptime_premium"
@@ -922,7 +916,7 @@ async def successful_payment(message: Message):
 # ------------------------------
 async def on_startup():
     await init_db()
-    # Запускаем heartbeat-сервер
+    # Запускаем heartbeat-сервер на порту из переменной окружения
     asyncio.create_task(start_heartbeat_server())
     # Запускаем планировщик
     asyncio.create_task(scheduler_loop())
