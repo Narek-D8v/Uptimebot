@@ -41,11 +41,16 @@ from aiohttp import web
 from jsonpath_ng import parse as jp_parse
 
 matplotlib.use('Agg')
+from dotenv import load_dotenv
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ellis")
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(BASE_DIR)
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN not set!")
 
